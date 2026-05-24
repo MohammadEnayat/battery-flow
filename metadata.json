@@ -1,0 +1,1 @@
+{"name":"Battery Monitor","description":"Real-time battery charging statistics (voltage, wattage, temperature), history logs, customization, and predictive analytics.","requestFramePermissions":[],"majorCapabilities":["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]}

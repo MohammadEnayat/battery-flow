@@ -1,0 +1,16 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    
+    <!-- Centered high-fidelity adaptive battery outline container in clean material green -->
+    <path
+        android:fillColor="#00E676"
+        android:pathData="M38,30 C34,30 31,33 31,37 L31,71 C31,75 34,78 38,78 L66,78 C70,78 73,75 73,71 L73,37 C73,33 70,30 66,30 Z M73,48 L77,48 C79,48 81,50 81,52 L81,56 C81,58 79,60 73,60" />
+        
+    <!-- Crisp centered lightning bolt negative cutout -->
+    <path
+        android:fillColor="#1E2229"
+        android:pathData="M54,36 L40,54 L50,54 L46,72 L62,50 L52,50 Z" />
+</vector>
