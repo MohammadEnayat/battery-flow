@@ -1,5 +1,6 @@
 package com.example.presentation.viewmodel
 
+import android.annotation.SuppressLint
 import android.app.Application
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -25,12 +26,15 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+import com.example.data.local.DataStoreManager
 
 class BatteryViewModel(
     private val app: Application,
-    private val repository: BatteryRepository
+    private val repository: BatteryRepository,
+    private val dataStoreManager: DataStoreManager
 ) : AndroidViewModel(app) {
 
     private val _batteryState = MutableStateFlow(BatteryStatus())
@@ -50,6 +54,7 @@ class BatteryViewModel(
     val isChargingSessionActive = _isChargingSessionActive.asStateFlow()
 
     private var alertedFullForCurrentSession = false
+    private var isInitialUpdate = true
 
     val chargingHistory: StateFlow<List<ChargingSession>> = repository.getAllSessions()
         .stateIn(
@@ -66,15 +71,39 @@ class BatteryViewModel(
 
     private val batteryManager = app.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
 
+    @SuppressLint("PrivateApi")
     private fun getSystemBatteryCapacity(context: Context): Double {
         try {
             val powerProfileClass = Class.forName("com.android.internal.os.PowerProfile")
             val powerProfileConstructor = powerProfileClass.getConstructor(Context::class.java)
             val powerProfileInstance = powerProfileConstructor.newInstance(context)
-            val getAveragePowerMethod = powerProfileClass.getMethod("getAveragePower", String::class.java)
-            val capacity = getAveragePowerMethod.invoke(powerProfileInstance, "battery.capacity") as Double
+            val getAveragePowerMethod =
+                powerProfileClass.getMethod("getAveragePower", String::class.java)
+            val capacity =
+                getAveragePowerMethod.invoke(powerProfileInstance, "battery.capacity") as Double
             if (capacity > 0) return capacity
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+        }
+
+        try {
+            val batteryManager =
+                context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+            if (batteryManager != null) {
+                val chargeCounter =
+                    batteryManager.getLongProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER) // in uAh
+                val capacity =
+                    batteryManager.getLongProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) // percentage (0-100)
+                if (chargeCounter > 0 && capacity > 0) {
+                    val estimatedCapacity = (chargeCounter / 1000.0) * 100.0 / capacity
+                    // Ensure the estimated value is within a reasonable range for smartphones/tablets
+                    if (estimatedCapacity in 1500.0..10000.0) {
+                        return estimatedCapacity
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+
         return 5000.0 // Realistic standard fallback
     }
 
@@ -83,18 +112,21 @@ class BatteryViewModel(
         val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
         val batteryLevel = if (level >= 0 && scale > 0) (level * 100 / scale) else 0
 
-        val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN)
+        val status =
+            intent.getIntExtra(BatteryManager.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN)
         val plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1)
-        
+
         val voltageMv = intent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, 0)
         val voltage = voltageMv / 1000f // Volts
 
         val tempTenths = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0)
         val temperature = tempTenths / 10f // Celsius
 
-        val health = intent.getIntExtra(BatteryManager.EXTRA_HEALTH, BatteryManager.BATTERY_HEALTH_UNKNOWN)
+        val health =
+            intent.getIntExtra(BatteryManager.EXTRA_HEALTH, BatteryManager.BATTERY_HEALTH_UNKNOWN)
 
-        var currentMicroAmps = batteryManager.getLongProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
+        var currentMicroAmps =
+            batteryManager.getLongProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
         // Check for common scaling differences in microamps/milliamps
         if (abs(currentMicroAmps) > 1000000) {
             currentMicroAmps /= 1000
@@ -106,7 +138,8 @@ class BatteryViewModel(
         val wattage = voltage * (currentNow / 1000f)
 
         val maxCap = getSystemBatteryCapacity(context).toInt()
-        val chargeCounterMicroAh = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
+        val chargeCounterMicroAh =
+            batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
         var capacityMah = if (chargeCounterMicroAh > 0) {
             chargeCounterMicroAh / 1000
         } else {
@@ -125,7 +158,8 @@ class BatteryViewModel(
         var dischargeTimeRemaining = -1L
         var dischargeRatePercentPerHour = 0f
 
-        val isChargingValue = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+        val isChargingValue =
+            status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
         if (!isChargingValue) {
             val drainCurrentMa = abs(currentNow)
             if (drainCurrentMa > 10f) {
@@ -182,18 +216,40 @@ class BatteryViewModel(
         awaitClose {
             try {
                 app.unregisterReceiver(receiver)
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+            }
         }
     }
 
     init {
         viewModelScope.launch {
-            createBatteryStatusFlow().collect { statusUpdate ->
-                _batteryState.value = statusUpdate
-                handleBatteryUpdate(statusUpdate)
+            // 1. Force waiting for the initial preference value from DataStore first
+            alertedFullForCurrentSession = dataStoreManager.alertedFullForCurrentSessionFlow.first()
+
+            // 2. Start subsequent flow collection
+            launch {
+                dataStoreManager.alertedFullForCurrentSessionFlow.collect { alerted ->
+                    alertedFullForCurrentSession = alerted
+                }
+            }
+
+            // 3. Start collecting battery updates once preference is loaded
+            launch {
+                createBatteryStatusFlow().collect { statusUpdate ->
+                    _batteryState.value = statusUpdate
+                    handleBatteryUpdate(statusUpdate)
+                    isInitialUpdate = false
+                }
             }
         }
         loadTips()
+    }
+
+    private fun setAlertedFull(value: Boolean) {
+        alertedFullForCurrentSession = value
+        viewModelScope.launch {
+            dataStoreManager.setAlertedFullForCurrentSession(value)
+        }
     }
 
     private fun handleBatteryUpdate(status: BatteryStatus) {
@@ -209,14 +265,19 @@ class BatteryViewModel(
                 peakWattageSum = 0f
                 isTrackedActiveSession = true
                 _isChargingSessionActive.value = true
-                alertedFullForCurrentSession = false
+                
+                // Only reset the alerted flag if this is a new charging session transition,
+                // not the initial system sticky intent startup load.
+                if (!isInitialUpdate) {
+                    setAlertedFull(false)
+                }
             }
 
             voltageSum += status.voltage
             voltageCount++
             tempSum += status.temperature
             tempCount++
-            
+
             val absCurrent = abs(status.currentNow)
             if (absCurrent > peakCurrentSum) {
                 peakCurrentSum = absCurrent
@@ -228,16 +289,17 @@ class BatteryViewModel(
 
             if (status.level >= 100 && !alertedFullForCurrentSession) {
                 sendFullyChargedNotification()
-                alertedFullForCurrentSession = true
+                setAlertedFull(true)
             }
 
         } else {
             if (isTrackedActiveSession) {
                 val endTime = System.currentTimeMillis()
                 val finalLevel = status.level
-                
+
                 if (endTime - activeSessionStartTime > 3000) { // At least 3 seconds
-                    val avgVoltage = if (voltageCount > 0) (voltageSum / voltageCount) else status.voltage
+                    val avgVoltage =
+                        if (voltageCount > 0) (voltageSum / voltageCount) else status.voltage
                     val avgTemp = if (tempCount > 0) (tempSum / tempCount) else status.temperature
 
                     val finishedSession = ChargingSession(
@@ -255,7 +317,7 @@ class BatteryViewModel(
                         repository.saveSession(finishedSession)
                     }
                 }
-                
+
                 isTrackedActiveSession = false
                 _isChargingSessionActive.value = false
             }
@@ -263,16 +325,17 @@ class BatteryViewModel(
     }
 
     private fun sendFullyChargedNotification() {
-        val notificationManager = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        
+        val notificationManager =
+            app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
         val launchIntent = app.packageManager.getLaunchIntentForPackage(app.packageName)?.apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
         }
         val pendingIntent = if (launchIntent != null) {
             PendingIntent.getActivity(
-                app, 
-                0, 
-                launchIntent, 
+                app,
+                0,
+                launchIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
         } else null
